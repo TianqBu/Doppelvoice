@@ -1,0 +1,10 @@
+websockets>=12.0
+sounddevice>=0.4.6
+numpy>=1.24
+python-dotenv>=1.0
+loguru>=0.7
+soxr>=0.3; platform_system != "Emscripten"
+protobuf>=5.0
+grpcio-tools>=1.60
+PySide6>=6.6
+qasync>=0.27

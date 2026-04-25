@@ -8,3 +8,4 @@ protobuf>=5.0
 grpcio-tools>=1.60
 PySide6>=6.6
 qasync>=0.27
+soundfile>=0.13.1

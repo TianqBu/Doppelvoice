@@ -11,7 +11,9 @@
 - 服务必须在火山引擎控制台开通
 
 ### "API 连通失败: code=11500"
-请求参数错。最可能是 `source_language` / `target_language` 不在支持范围。目前支持：`zh ↔ en`。
+请求参数错。最可能是 `source_language` / `target_language` 取了非法值。
+官方接入文档（1756902）支持 9 种取值：`zh / en / ja / id / es / pt / de / fr / zhen`。
+其中 `zhen` 是「中英互译」自动双向模式，源/目标必须同为 `zhen`。
 
 ### 卡在"建立会话…"不动
 1. 网络无法到达 `openspeech.bytedance.com`，检查防火墙

@@ -6,6 +6,9 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Optional, Protocol
 
 from loguru import logger
@@ -23,6 +26,18 @@ class _FatalRemote(Exception):
         super().__init__(f"FATAL remote code={code} msg={message}")
         self.code = code
         self.message = message
+
+
+@dataclass
+class _ReceiverContext:
+    """_receiver_loop 内部跨多个 handler 的可变状态。"""
+    decoder: Optional["OggOpusDecoder"]
+    playback_sr: int
+    dump_root: Optional[Path]
+    sentence_idx: int = 0
+    chunk_count_this_sentence: int = 0
+    in_sentence: bool = False
+    logged_first_audio: bool = False
 
 
 # 只对"瞬时"错误重连（对应 au_base.proto Code 枚举）
@@ -58,10 +73,15 @@ def _drain_queue(q: asyncio.Queue) -> int:
 
 class Orchestrator:
     def __init__(self, cfg: AppConfig, event_bus: Optional[EventBus] = None):
-        self.cfg = cfg
+        # 关键：拍快照。子 config (audio/translation/network) 是 frozen 的，
+        # GUI 后续 `cfg.audio = replace(..)` 不会影响我们这份会话。
+        self.cfg = cfg.snapshot()
         self.event_bus = event_bus
         self._stop = asyncio.Event()
         self._metrics_task: Optional[asyncio.Task] = None
+        # 暴露给 GUI 读取 peak_level（替代了之前的独立 mic meter 流）
+        self.capture: Optional[MicCapture] = None
+        self.playback: Optional[VirtualMicPlayback] = None
 
     def stop(self) -> None:
         """线程安全：供 GUI / 外部代码触发优雅停机。"""
@@ -72,7 +92,7 @@ class Orchestrator:
             try:
                 self.event_bus.status.emit(key, msg)
             except Exception:
-                pass
+                logger.debug("event_bus.status.emit failed", exc_info=True)
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
@@ -87,10 +107,12 @@ class Orchestrator:
         self._emit_status("opening_audio", "打开音频设备…")
         playback = VirtualMicPlayback(self.cfg.audio)
         playback.start()
+        self.playback = playback
 
         capture_q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=50)
         capture = MicCapture(self.cfg.audio, capture_q, loop)
         capture.start()
+        self.capture = capture
         self._emit_status("audio_ready", "音频就绪")
 
         self._metrics_task = asyncio.create_task(self._metrics_loop(playback, capture_q))
@@ -124,6 +146,8 @@ class Orchestrator:
                 self._metrics_task.cancel()
             capture.stop()
             playback.stop()
+            self.capture = None
+            self.playback = None
             logger.info("已退出")
 
     async def _one_session(self, capture_q: asyncio.Queue[bytes], playback: VirtualMicPlayback) -> None:
@@ -187,111 +211,123 @@ class Orchestrator:
                 await client.send_audio(silence)
 
     async def _receiver_loop(self, client: DoubaoClient, playback: VirtualMicPlayback) -> None:
-        import time
-        is_opus = self.cfg.audio.output_format == "ogg_opus"
-        decoder = OggOpusDecoder() if is_opus else None
-        logged_first_audio = False
-        dump_root = (
-            self.cfg.log_dir / "sentences" / time.strftime("%Y%m%d_%H%M%S")
-            if self.cfg.dump_audio_to_disk else None
+        """收事件主循环。具体每种事件分发给 _handle_* 协助函数，避免一个 80+ 行
+        多重嵌套的 if/elif 大锅。"""
+        ctx = _ReceiverContext(
+            decoder=OggOpusDecoder() if self.cfg.audio.output_format == "ogg_opus" else None,
+            playback_sr=playback.device_sample_rate,
+            dump_root=(
+                self.cfg.log_dir / "sentences" / time.strftime("%Y%m%d_%H%M%S")
+                if self.cfg.dump_audio_to_disk else None
+            ),
         )
-        sentence_idx = 0
-        in_sentence = False
-        chunk_count_this_sentence = 0
-
-        # 关键：让 decoder 直接 resample 到设备原生率，避免双重重采样引起的速度偏差
-        playback_sr = playback.device_sample_rate
         logger.info(
-            f"receiver pipeline: opus → decoder(target {playback_sr}Hz) → playback device {playback_sr}Hz"
+            f"receiver pipeline: opus → decoder(target {ctx.playback_sr}Hz) → "
+            f"playback device {ctx.playback_sr}Hz"
         )
-
-        def _dump_path(suffix: str = "") -> "Path | None":
-            if dump_root is None:
-                return None
-            return dump_root / f"{sentence_idx:03d}{suffix}.ogg"
 
         async for ev in client.iter_events():
-            if ev.kind == "audio" and ev.audio:
-                if not logged_first_audio:
-                    logger.info(
-                        f"首个译音 chunk: {len(ev.audio)} bytes, "
-                        f"magic={ev.audio[:4]!r}, format={self.cfg.audio.output_format}"
-                    )
-                    logged_first_audio = True
-                if self.event_bus is not None:
-                    self.event_bus.emit(ev)
-                if decoder is not None:
-                    decoder.feed(ev.audio)
-                    chunk_count_this_sentence += 1
-                else:
-                    playback.push_pcm(ev.audio)
-            elif ev.kind == "sentence_start" and decoder is not None:
-                decoder.reset()
-                in_sentence = True
-                chunk_count_this_sentence = 0
-                logger.debug("sentence_start")
-            elif ev.kind == "sentence_end" and decoder is not None:
-                in_sentence = False
-                if decoder.has_data():
-                    sentence_idx += 1
-                    blob_size = decoder.size()
-                    # 直接输出设备原生率，playback 不再 resample
-                    pcm = decoder.drain(playback_sr, dump_path=_dump_path())
-                    if pcm:
-                        playback.push_pcm_at_device_rate(pcm)
-                        logger.info(
-                            f"[sent #{sentence_idx}] {chunk_count_this_sentence} chunks / "
-                            f"{blob_size} B ogg → {len(pcm)} B PCM @ {playback_sr}Hz "
-                            f"({len(pcm) // 2 / playback_sr:.2f}s)"
-                        )
-                    else:
-                        logger.warning(
-                            f"[sent #{sentence_idx}] 解码失败 "
-                            f"({chunk_count_this_sentence} chunks / {blob_size} B)"
-                        )
-                else:
-                    logger.debug(f"sentence_end 但无数据（chunks={chunk_count_this_sentence}）")
-            elif ev.kind == "tts_ended" and decoder is not None and decoder.has_data():
-                sentence_idx += 1
-                blob_size = decoder.size()
-                pcm = decoder.drain(playback_sr, dump_path=_dump_path("_endflush"))
-                if pcm:
-                    playback.push_pcm_at_device_rate(pcm)
-                    logger.info(f"[tts_ended flush #{sentence_idx}] {blob_size}B ogg → {len(pcm)}B PCM")
-            elif ev.kind == "target_text":
-                # 跳过空文本（服务端 VAD 误触发会发空 start/end 对）
-                if not (ev.text or "").strip():
-                    continue
-                if self.cfg.log_subtitle_text:
-                    tag = "译文" if ev.is_definite else "译文·"
-                    logger.info(f"[{tag}] {ev.text}")
-                else:
-                    logger.info(
-                        f"[译文{'·终' if ev.is_definite else '·'}] ({len(ev.text)} chars)"
-                    )
-                if self.event_bus is not None:
-                    self.event_bus.emit(ev)
-            elif ev.kind == "source_text":
-                if not (ev.text or "").strip():
-                    continue
-                if self.cfg.log_subtitle_text:
-                    tag = "原文" if ev.is_definite else "原文·"
-                    logger.debug(f"[{tag}] {ev.text}")
-                if self.event_bus is not None:
-                    self.event_bus.emit(ev)
-            elif ev.kind == "error":
-                logger.error(
-                    f"服务端错误 event={ev.raw_event} code={ev.status_code} msg={ev.message!r}"
-                )
-                # 只白名单里的瞬时错误重连；其它（鉴权/参数/格式）全部 fatal
-                if ev.status_code in _TRANSIENT_CODES:
-                    raise RuntimeError(f"remote transient code={ev.status_code} msg={ev.message}")
-                raise _FatalRemote(ev.status_code, ev.message)
-            elif ev.kind == "session_finished":
+            kind = ev.kind
+            if kind == "audio" and ev.audio:
+                self._handle_audio(ev, ctx, playback)
+            elif kind in ("sentence_start", "sentence_end", "tts_ended"):
+                self._handle_sentence(ev, ctx, playback)
+            elif kind in ("target_text", "source_text"):
+                self._handle_subtitle(ev)
+            elif kind == "error":
+                self._handle_error(ev)  # 抛 _FatalRemote / RuntimeError
+            elif kind == "session_finished":
                 logger.info("会话结束")
                 return
-            elif ev.kind == "usage":
+            elif kind == "usage":
                 logger.info(f"计费: {ev.message}")
+
+    # ── _receiver_loop 的协助函数 ──
+
+    def _handle_audio(
+        self, ev: TranslationEvent, ctx: "_ReceiverContext", playback: VirtualMicPlayback
+    ) -> None:
+        if not ctx.logged_first_audio:
+            logger.info(
+                f"首个译音 chunk: {len(ev.audio)} bytes, "
+                f"magic={ev.audio[:4]!r}, format={self.cfg.audio.output_format}"
+            )
+            ctx.logged_first_audio = True
+        if self.event_bus is not None:
+            self.event_bus.emit(ev)
+        if ctx.decoder is not None:
+            ctx.decoder.feed(ev.audio)
+            ctx.chunk_count_this_sentence += 1
+        else:
+            playback.push_pcm(ev.audio)
+
+    def _handle_sentence(
+        self, ev: TranslationEvent, ctx: "_ReceiverContext", playback: VirtualMicPlayback
+    ) -> None:
+        if ctx.decoder is None:
+            return
+        if ev.kind == "sentence_start":
+            ctx.decoder.reset()
+            ctx.in_sentence = True
+            ctx.chunk_count_this_sentence = 0
+            logger.debug("sentence_start")
+            return
+
+        if ev.kind == "sentence_end":
+            ctx.in_sentence = False
+            if not ctx.decoder.has_data():
+                logger.debug(f"sentence_end 但无数据（chunks={ctx.chunk_count_this_sentence}）")
+                return
+            self._drain_sentence(ctx, playback, suffix="")
+            return
+
+        # tts_ended：flush 残留
+        if ev.kind == "tts_ended" and ctx.decoder.has_data():
+            self._drain_sentence(ctx, playback, suffix="_endflush")
+
+    def _drain_sentence(
+        self, ctx: "_ReceiverContext", playback: VirtualMicPlayback, *, suffix: str
+    ) -> None:
+        ctx.sentence_idx += 1
+        blob_size = ctx.decoder.size()
+        dump_path = (
+            ctx.dump_root / f"{ctx.sentence_idx:03d}{suffix}.ogg"
+            if ctx.dump_root is not None else None
+        )
+        pcm = ctx.decoder.drain(ctx.playback_sr, dump_path=dump_path)
+        if not pcm:
+            logger.warning(
+                f"[sent #{ctx.sentence_idx}{suffix}] 解码失败 "
+                f"({ctx.chunk_count_this_sentence} chunks / {blob_size} B)"
+            )
+            return
+        playback.push_pcm_at_device_rate(pcm)
+        logger.info(
+            f"[sent #{ctx.sentence_idx}{suffix}] {ctx.chunk_count_this_sentence} chunks / "
+            f"{blob_size} B ogg → {len(pcm)} B PCM @ {ctx.playback_sr}Hz "
+            f"({len(pcm) // 2 / ctx.playback_sr:.2f}s)"
+        )
+
+    def _handle_subtitle(self, ev: TranslationEvent) -> None:
+        if not (ev.text or "").strip():
+            return  # 服务端 VAD 误触发会发空 start/end 对
+        is_target = ev.kind == "target_text"
+        if self.cfg.log_subtitle_text:
+            tag = ("译文" if is_target else "原文") + ("" if ev.is_definite else "·")
+            (logger.info if is_target else logger.debug)(f"[{tag}] {ev.text}")
+        elif is_target:
+            logger.info(f"[译文{'·终' if ev.is_definite else '·'}] ({len(ev.text)} chars)")
+        if self.event_bus is not None:
+            self.event_bus.emit(ev)
+
+    def _handle_error(self, ev: TranslationEvent) -> None:
+        logger.error(
+            f"服务端错误 event={ev.raw_event} code={ev.status_code} msg={ev.message!r}"
+        )
+        # 只白名单里的瞬时错误重连；其它（鉴权/参数/格式）全部 fatal
+        if ev.status_code in _TRANSIENT_CODES:
+            raise RuntimeError(f"remote transient code={ev.status_code} msg={ev.message}")
+        raise _FatalRemote(ev.status_code, ev.message)
 
     async def _metrics_loop(self, playback: VirtualMicPlayback, cap_q: asyncio.Queue[bytes]) -> None:
         try:

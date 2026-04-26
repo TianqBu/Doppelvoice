@@ -12,12 +12,18 @@ class SubtitleView(QTextEdit):
     每 is_definite=False 的文本 → 替换当前"进行中"那行
     """
 
+    # 字幕历史 paragraph 上限：长跑会话防 QTextDocument 无界增长。
+    # 一句字幕 = 一个 block；2000 句 ~= 几小时使用，超出从头 FIFO 丢弃。
+    MAX_BLOCKS = 2000
+
     def __init__(self, title_color: str = "#1e90ff"):
         super().__init__()
         self.setReadOnly(True)
         self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         f = QFont("Microsoft YaHei", 14)
         self.setFont(f)
+        # Qt 原生上限：超出 MAX_BLOCKS 自动从开头删 block，无需手动维护
+        self.document().setMaximumBlockCount(self.MAX_BLOCKS)
         self.setStyleSheet(
             "QTextEdit { background:#1e1e1e; color:#e0e0e0; border:1px solid #333; "
             "padding:8px; border-radius:6px; }"

@@ -1,6 +1,8 @@
 """读写 .env 文件（保留注释和未触碰的 key）。"""
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 
 from doppelvoice.config import PROJECT_ROOT
@@ -55,7 +57,28 @@ def write_env(updates: dict[str, str], *, preserve_unknown: bool = True) -> None
         if k not in seen_keys:
             existing_lines.append(f"{k}={v}")
 
-    p.write_text("\n".join(existing_lines) + "\n", encoding="utf-8")
+    # 原子写：先写同目录临时文件再 os.replace —— 防止崩溃中途截断密钥
+    payload = "\n".join(existing_lines) + "\n"
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        prefix=".env.", suffix=".tmp", dir=str(p.parent)
+    )
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8", newline="") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, p)
+        # 尽量收紧权限（POSIX 有效；Windows 上 chmod 行为受限，不强求）
+        try:
+            os.chmod(p, 0o600)
+        except OSError:
+            pass
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def has_credentials() -> bool:

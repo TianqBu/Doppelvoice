@@ -2,11 +2,9 @@
 from __future__ import annotations
 
 import asyncio
-import threading
+from dataclasses import replace
 from typing import Optional
 
-import numpy as np
-import sounddevice as sd
 from loguru import logger
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
@@ -17,6 +15,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QStatusBar,
     QToolBar,
@@ -36,6 +35,10 @@ from doppelvoice.gui.widgets.audio_meter import AudioLevelMeter
 from doppelvoice.gui.widgets.status_badge import StatusBadge
 from doppelvoice.pipeline.orchestrator import Orchestrator
 
+# 豆包同传 2.0 公开 API 支持的语言代码（来自官方接入文档 1756902，2025-10-11）
+# zhen = 中英互译（自动双向，源/目标都填 zhen）
+SUPPORTED_LANGS: tuple[str, ...] = ("zh", "en", "ja", "id", "es", "pt", "de", "fr", "zhen")
+
 
 class MainWindow(QMainWindow):
     def __init__(self, cfg: AppConfig, i18n: I18n, theme: ThemeName = "dark"):
@@ -48,12 +51,11 @@ class MainWindow(QMainWindow):
         self.run_task: Optional[asyncio.Task] = None
         self._sentence_count = 0
         self._audio_bytes = 0
-        self._mic_meter_stream: Optional[sd.InputStream] = None
-        self._mic_meter_lock = threading.Lock()
-        self._mic_level = 0.0
+        # 电平表数据：从 orchestrator.capture.peak_level 拉，未启动时为 0
 
         self.setWindowTitle("Doppelvoice")
         self.resize(960, 760)
+        self._quitting: bool = False
 
         self._build_ui()
         self._wire_signals()
@@ -62,11 +64,9 @@ class MainWindow(QMainWindow):
         self.i18n.language_changed.connect(self._apply_translations)
 
         self._metrics_timer = QTimer(self)
-        self._metrics_timer.setInterval(500)
+        self._metrics_timer.setInterval(150)  # 电平表 ~6Hz 更新足够流畅
         self._metrics_timer.timeout.connect(self._tick_metrics)
         self._metrics_timer.start()
-
-        self._start_mic_meter()
 
     # ── UI ──
     def _build_ui(self) -> None:
@@ -116,16 +116,12 @@ class MainWindow(QMainWindow):
         lang_row = QHBoxLayout()
         self.src_lang_label = QLabel()
         self.src_lang = QComboBox()
-        self.src_lang.addItem("中文", "zh")
-        self.src_lang.addItem("English", "en")
-        self.src_lang.setCurrentIndex(0 if self.cfg.translation.source_language == "zh" else 1)
         self.arrow_label = QLabel("→")
         self.arrow_label.setStyleSheet("font-size: 16px; padding: 0 6px;")
         self.tgt_lang_label = QLabel()
         self.tgt_lang = QComboBox()
-        self.tgt_lang.addItem("English", "en")
-        self.tgt_lang.addItem("中文", "zh")
-        self.tgt_lang.setCurrentIndex(0 if self.cfg.translation.target_language == "en" else 1)
+        # 实际项填充延迟到 _populate_language_combos()，i18n 切换时会重绘
+        self._populate_language_combos()
         lang_row.addWidget(self.src_lang_label)
         lang_row.addWidget(self.src_lang)
         lang_row.addWidget(self.arrow_label)
@@ -246,7 +242,7 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         tb.addWidget(self.clear_btn)
         spacer = QWidget()
-        spacer.setSizePolicy(QWidget().sizePolicy())
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         tb.addWidget(spacer)
         tb.addWidget(self.settings_btn)
 
@@ -256,6 +252,9 @@ class MainWindow(QMainWindow):
         self.clear_btn.clicked.connect(self._clear_subtitles)
         self.refresh_btn.clicked.connect(self._refresh_device_lists)
         self.settings_btn.clicked.connect(self._open_settings)
+        # zhen 模式互锁：源/目标其一选 zhen 时另一端自动跟随；箭头形状随之切换
+        self.src_lang.currentIndexChanged.connect(self._on_lang_changed)
+        self.tgt_lang.currentIndexChanged.connect(self._on_lang_changed)
 
         self.bus.source_text.connect(self.src_view.feed)
         self.bus.target_text.connect(self.tgt_view.feed)
@@ -295,26 +294,99 @@ class MainWindow(QMainWindow):
             self.tgt_wrap_label.setText(i.t("subtitle.target"))
         cur_state = str(self.status_badge.property("state") or "idle")
         self.status_badge.set_state(cur_state, i.t(f"status.{cur_state}"))
+        # 语言下拉显示文本随 UI 语言更新
+        if hasattr(self, "src_lang") and self.src_lang.count() > 0:
+            self._populate_language_combos()
+
+    # ── 语言下拉填充 / i18n 重绘 ──
+    def _populate_language_combos(self) -> None:
+        """填充源/目标语言下拉，按当前 i18n 显示本地化语言名。
+
+        - 显示文本：本地化的语言全名（如 "中文" / "Japanese"）
+        - userData：豆包 API 接受的代码（zh/en/ja/id/es/pt/de/fr/zhen）
+        保留当前选择，避免重绘后跳到第一项。
+        """
+        prev_src = self.src_lang.currentData() or self.cfg.translation.source_language
+        prev_tgt = self.tgt_lang.currentData() or self.cfg.translation.target_language
+        # blockSignals 防止填充期间触发不必要的回调
+        self.src_lang.blockSignals(True)
+        self.tgt_lang.blockSignals(True)
+        try:
+            self.src_lang.clear()
+            self.tgt_lang.clear()
+            for code in SUPPORTED_LANGS:
+                label = self.i18n.t(f"config.lang.{code}")
+                self.src_lang.addItem(label, code)
+                self.tgt_lang.addItem(label, code)
+            self._select_combo_by_data(self.src_lang, prev_src, fallback="zh")
+            self._select_combo_by_data(self.tgt_lang, prev_tgt, fallback="en")
+        finally:
+            self.src_lang.blockSignals(False)
+            self.tgt_lang.blockSignals(False)
+
+    @staticmethod
+    def _select_combo_by_data(combo: QComboBox, data: str, *, fallback: str) -> None:
+        for i in range(combo.count()):
+            if combo.itemData(i) == data:
+                combo.setCurrentIndex(i)
+                return
+        for i in range(combo.count()):
+            if combo.itemData(i) == fallback:
+                combo.setCurrentIndex(i)
+                return
+
+    def _on_lang_changed(self) -> None:
+        """zhen（中英互译）模式互锁：源和目标必须同为 zhen 或同非 zhen。
+
+        - 用户把 sender 改成 zhen → 把另一端也设为 zhen
+        - 用户把 sender 改成非 zhen，但另一端还是 zhen → 把另一端默认成 zh/en 中合适的一个
+        - 否则不动另一端
+        都用 blockSignals 防止互改触发递归。
+        """
+        sender = self.sender()
+        src_code = self.src_lang.currentData()
+        tgt_code = self.tgt_lang.currentData()
+        other = self.tgt_lang if sender is self.src_lang else self.src_lang
+        sender_code = src_code if sender is self.src_lang else tgt_code
+        other_code = tgt_code if sender is self.src_lang else src_code
+
+        target_other: str | None = None
+        if sender_code == "zhen" and other_code != "zhen":
+            target_other = "zhen"
+        elif sender_code != "zhen" and other_code == "zhen":
+            # 离开 zhen：另一端给一个合理的默认（避免源==目标）
+            target_other = "en" if sender_code == "zh" else "zh"
+
+        if target_other is not None:
+            other.blockSignals(True)
+            try:
+                self._select_combo_by_data(other, target_other, fallback=target_other)
+            finally:
+                other.blockSignals(False)
+
+        is_bidi = self.src_lang.currentData() == "zhen"
+        self.arrow_label.setText("⇄" if is_bidi else "→")
 
     # ── 设备列表 ──
     def _refresh_device_lists(self) -> None:
+        """每颗物理设备一条；host API 选择对用户透明（按设备管理器视角呈现）。"""
         self.input_dev.clear()
         self.output_dev.clear()
-        devs = audio_devices.list_devices()
-        def in_pri(d):
-            return {"MME": 0, "Windows DirectSound": 1, "Windows WASAPI": 2}.get(d.hostapi_name, 9)
-        def out_pri(d):
-            return {"Windows WASAPI": 0, "MME": 1, "Windows DirectSound": 2}.get(d.hostapi_name, 9)
-        for d in sorted(devs, key=in_pri):
-            if d.max_input_channels > 0:
-                self.input_dev.addItem(
-                    f"[{d.hostapi_name[:5]}] {d.name} ({int(d.default_samplerate)}Hz)", d.name
-                )
-        for d in sorted(devs, key=out_pri):
-            if d.max_output_channels > 0:
-                self.output_dev.addItem(
-                    f"[{d.hostapi_name[:5]}] {d.name} ({int(d.default_samplerate)}Hz)", d.name
-                )
+        for u in audio_devices.list_unique_devices("input"):
+            # tooltip 里带上选中的 host API，供调试时查看；正常 UI 干净
+            self.input_dev.addItem(u.name, u.name)
+            self.input_dev.setItemData(
+                self.input_dev.count() - 1,
+                f"{u.name}\n后端: {u.chosen_hostapi} · {int(u.default_samplerate)}Hz",
+                Qt.ItemDataRole.ToolTipRole,
+            )
+        for u in audio_devices.list_unique_devices("output"):
+            self.output_dev.addItem(u.name, u.name)
+            self.output_dev.setItemData(
+                self.output_dev.count() - 1,
+                f"{u.name}\n后端: {u.chosen_hostapi} · {int(u.default_samplerate)}Hz",
+                Qt.ItemDataRole.ToolTipRole,
+            )
         if self.cfg.audio.input_device:
             self._select_by_substring(self.input_dev, self.cfg.audio.input_device)
         if self.cfg.audio.output_device:
@@ -329,48 +401,23 @@ class MainWindow(QMainWindow):
                 combo.setCurrentIndex(i)
                 return
 
-    # ── 麦克风电平监控（独立流，仅做可视化）──
-    def _start_mic_meter(self) -> None:
-        try:
-            self._mic_meter_stream = sd.InputStream(
-                samplerate=44100, channels=1, dtype="float32",
-                blocksize=2048, callback=self._mic_meter_cb, latency="low",
-            )
-            self._mic_meter_stream.start()
-        except Exception as e:
-            logger.debug(f"mic meter unavailable: {e}")
-
-    def _mic_meter_cb(self, indata, frames, time_info, status):
-        if status:
-            return
-        try:
-            arr = np.array(indata, dtype=np.float32).flatten()
-            rms = float(np.sqrt(np.mean(arr ** 2)))
-            level = min(1.0, rms * 6)
-            with self._mic_meter_lock:
-                self._mic_level = level
-        except Exception:
-            pass
-
-    def _stop_mic_meter(self) -> None:
-        if self._mic_meter_stream is not None:
-            try:
-                self._mic_meter_stream.stop()
-                self._mic_meter_stream.close()
-            except Exception:
-                pass
-            self._mic_meter_stream = None
-
     # ── 启停 ──
     def _pull_config(self) -> None:
-        self.cfg.translation.source_language = self.src_lang.currentData()
-        self.cfg.translation.target_language = self.tgt_lang.currentData()
+        # 子 config 是 frozen，用 replace 整体换
+        self.cfg.translation = replace(
+            self.cfg.translation,
+            source_language=self.src_lang.currentData(),
+            target_language=self.tgt_lang.currentData(),
+        )
         in_name = self.input_dev.currentData()
         out_name = self.output_dev.currentData()
+        audio_overrides: dict = {}
         if in_name:
-            self.cfg.audio.input_device = in_name
+            audio_overrides["input_device"] = in_name
         if out_name:
-            self.cfg.audio.output_device = out_name
+            audio_overrides["output_device"] = out_name
+        if audio_overrides:
+            self.cfg.audio = replace(self.cfg.audio, **audio_overrides)
 
     def _on_start(self) -> None:
         if self.run_task is not None:
@@ -396,7 +443,14 @@ class MainWindow(QMainWindow):
         self._audio_bytes = 0
         self.bus.status.emit("connecting", self.i18n.t("status.connecting"))
 
-        loop = asyncio.get_event_loop()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # qasync 未启动 / loop 不在当前线程：直接报错而非静默
+            logger.error("no running event loop; qasync not initialized?")
+            self.bus.error.emit("event loop not available")
+            self._set_running_state(False)
+            return
         self.run_task = loop.create_task(self._run_orch())
 
     async def _run_orch(self) -> None:
@@ -446,8 +500,13 @@ class MainWindow(QMainWindow):
         self.status_badge.set_state(state, display)
 
     def _tick_metrics(self) -> None:
-        with self._mic_meter_lock:
-            self.audio_meter.set_level(self._mic_level)
+        # 电平：未启动时为 0；启动后从 orchestrator 内部 capture 取
+        level = 0.0
+        if self.orchestrator is not None:
+            cap = getattr(self.orchestrator, "capture", None)
+            if cap is not None:
+                level = getattr(cap, "peak_level", 0.0)
+        self.audio_meter.set_level(level)
         kb = self._audio_bytes / 1024
         self.metric_label.setText(
             f"{self.i18n.t('stats.audio_received')}: {kb:.1f} KB · "
@@ -482,6 +541,10 @@ class MainWindow(QMainWindow):
 
     # ── 关闭 ──
     def closeEvent(self, event):  # noqa: N802
+        # 已经在退出过程中：直接接受第二次的 close 事件，不再弹确认框
+        if self._quitting:
+            event.accept()
+            return
         if self.run_task is not None:
             ret = QMessageBox.question(
                 self, self.i18n.t("app.title"), self.i18n.t("dialog.confirm_quit"),
@@ -492,10 +555,16 @@ class MainWindow(QMainWindow):
                 return
         if self.orchestrator is not None:
             self.orchestrator.stop()
-        self._stop_mic_meter()
         if self.run_task is not None and not self.run_task.done():
+            self._quitting = True
             event.ignore()
-            asyncio.get_event_loop().create_task(self._graceful_quit())
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # 极端情况：loop 已经关；直接强退
+                event.accept()
+                return
+            loop.create_task(self._graceful_quit())
         else:
             event.accept()
 

@@ -11,7 +11,9 @@ Authentication failed. Re-check `.env`:
 - Service must be enabled in Volcengine Console
 
 ### "API connectivity failed: code=11500"
-Invalid request parameters. Most likely a `source_language` / `target_language` value is wrong. Currently supported pairs: `zh ↔ en`.
+Invalid request parameters. Most likely `source_language` / `target_language` is set to an unsupported value.
+Per the official spec (doc 1756902), valid codes are: `zh / en / ja / id / es / pt / de / fr / zhen`.
+`zhen` is the bidirectional ZH⇄EN auto mode — both source and target must be set to `zhen`.
 
 ### Hangs forever on "建立会话…"
 1. Network can't reach `openspeech.bytedance.com`. Check firewall.

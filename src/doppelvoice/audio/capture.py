@@ -18,31 +18,16 @@ import sounddevice as sd
 from loguru import logger
 
 from doppelvoice.audio.devices import find_device
+from doppelvoice.audio.resample import resample_int16 as _resample
 from doppelvoice.config import AudioConfig
-
-try:
-    import soxr  # type: ignore
-    _HAS_SOXR = True
-except ImportError:
-    _HAS_SOXR = False
-
-
-def _resample(pcm_int16: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
-    """int16 → int16 重采样。优先 soxr（高质量），兜底线性插值。"""
-    if src_sr == dst_sr or len(pcm_int16) == 0:
-        return pcm_int16
-    if _HAS_SOXR:
-        out = soxr.resample(pcm_int16.astype(np.float32) / 32768.0, src_sr, dst_sr)
-        return np.clip(out * 32768.0, -32768, 32767).astype(np.int16)
-    n_out = int(len(pcm_int16) * dst_sr / src_sr)
-    if n_out <= 0:
-        return pcm_int16
-    x = np.linspace(0, len(pcm_int16) - 1, n_out)
-    return np.interp(x, np.arange(len(pcm_int16)), pcm_int16).astype(np.int16)
 
 
 class MicCapture:
-    """把麦克风 16kHz mono int16 PCM 以 chunk_ms 为粒度推入 asyncio 队列。"""
+    """把麦克风 16kHz mono int16 PCM 以 chunk_ms 为粒度推入 asyncio 队列。
+
+    顺手在回调里算每个 chunk 的 RMS，对外暴露 `peak_level`（0-1）供 GUI 电平表
+    复用，免得再开第二路 InputStream（既冗余又会和系统默认设备搞混）。
+    """
 
     def __init__(
         self,
@@ -62,9 +47,17 @@ class MicCapture:
         self._bridge_task: Optional[asyncio.Task] = None
         self._drops = 0
 
+        # 电平表：回调线程写，主线程读，原子赋值（GIL 下 float 赋值是原子的）
+        self._peak_level: float = 0.0
+
         # 采集时的实际采样率（可能 != cfg.input_sample_rate，需软件重采样）
         self._capture_sr: int = cfg.input_sample_rate
         self._capture_frames_per_chunk: int = self.frames_per_chunk
+
+    @property
+    def peak_level(self) -> float:
+        """最近一次回调计算的 RMS 电平（0-1）。线程安全（atomic float read）。"""
+        return self._peak_level
 
     def _callback(self, indata, frames, time_info, status):  # noqa: D401
         if self._closing.is_set():
@@ -83,9 +76,15 @@ class MicCapture:
         if self._capture_sr != self.cfg.input_sample_rate:
             samples = _resample(samples, self._capture_sr, self.cfg.input_sample_rate)
 
-        if self.cfg.silence_rms_threshold > 0:
-            rms = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2))) / 32768.0
-            if rms < self.cfg.silence_rms_threshold:
+        # 总是算 RMS（np.dot 比 (x**2).mean() 快 ~4×）：
+        # - 用于 GUI 电平表（替代第二路 mic 流）
+        # - 当 silence_rms_threshold > 0 时也用作客户端 VAD
+        if len(samples) > 0:
+            f = samples.astype(np.float32)
+            rms_norm = (float(np.dot(f, f) / len(f)) ** 0.5) / 32768.0
+            # min(1, rms*6) 把可见区间压在常态语音电平的有效范围内
+            self._peak_level = min(1.0, rms_norm * 6.0)
+            if self.cfg.silence_rms_threshold > 0 and rms_norm < self.cfg.silence_rms_threshold:
                 return
 
         data = samples.astype(np.int16).tobytes()

@@ -5,6 +5,7 @@ import asyncio
 import uuid
 from dataclasses import dataclass
 from typing import AsyncIterator, Optional
+from urllib.parse import urlparse
 
 import websockets
 from loguru import logger
@@ -12,10 +13,34 @@ from loguru import logger
 from doppelvoice.engine.protocol import ast_pb, events_pb, STATUS_SUCCESS, EventType
 from doppelvoice.config import AppConfig
 
+# 单帧上限：正常 TTSResponse 一般 1-50KB，4MB 留足余量。
+# 帮 ParseFromString 抵御恶意服务端构造的超大 protobuf。
+_MAX_FRAME_BYTES = 4 * 1024 * 1024
 
-@dataclass
+# 允许的 WS hostname 白名单：防止 .env 注入恶意 URL 把凭据发到攻击者。
+_ALLOWED_WS_HOSTS = {
+    "openspeech.bytedance.com",
+}
+
+
+def _validate_ws_url(url: str) -> None:
+    """拒绝 wss 之外的 scheme 和白名单外的 hostname。"""
+    parsed = urlparse(url)
+    if parsed.scheme != "wss":
+        raise ValueError(f"WS URL must use wss://, got scheme={parsed.scheme!r}")
+    host = parsed.hostname or ""
+    if host not in _ALLOWED_WS_HOSTS and not any(
+        host.endswith("." + h) for h in _ALLOWED_WS_HOSTS
+    ):
+        raise ValueError(
+            f"WS hostname {host!r} not in allowed list "
+            f"(set: {sorted(_ALLOWED_WS_HOSTS)})"
+        )
+
+
+@dataclass(frozen=True)
 class TranslationEvent:
-    """对上层暴露的事件。"""
+    """对上层暴露的事件。frozen=True：跨线程/跨协程的值对象，禁止变更。"""
     kind: str                            # "audio" | "source_text" | "target_text"
                                          # | "session_started" | "session_finished"
                                          # | "error" | "usage" | "raw"
@@ -34,9 +59,13 @@ class DoubaoClient:
         self.session_id: str = ""
         self.connection_id: str = ""
         self._sequence: int = 0
+        # send_audio 模板：会话开始后构建一次，每次只改 binary_data 再 SerializeToString
+        self._audio_req: Optional[ast_pb.TranslateRequest] = None
 
     # ── 连接 ──
     async def connect(self) -> None:
+        # 关键：连接前校验 URL，防止 .env 注入把密钥发到攻击者
+        _validate_ws_url(self.cfg.network.ws_url)
         cred = self.cfg.credentials
         self.connection_id = str(uuid.uuid4())
         headers = [
@@ -45,12 +74,14 @@ class DoubaoClient:
             ("X-Api-Resource-Id", cred.resource_id),
             ("X-Api-Connect-Id", self.connection_id),
         ]
-        logger.info("connecting to {}", self.cfg.network.ws_url)
+        # 日志只记 hostname，不记完整 URL（已校验过；规避未来 query string 漏洗）
+        host = urlparse(self.cfg.network.ws_url).hostname
+        logger.info("connecting to ws://{}…", host)
         self.ws = await asyncio.wait_for(
             websockets.connect(
                 self.cfg.network.ws_url,
                 additional_headers=headers,
-                max_size=64 * 1024 * 1024,
+                max_size=_MAX_FRAME_BYTES,
                 ping_interval=20,
                 ping_timeout=30,
                 close_timeout=5,
@@ -91,6 +122,8 @@ class DoubaoClient:
 
         if resp.event == EventType.SessionStarted:
             logger.info("✓ SessionStarted id={}", self.session_id)
+            # 会话建立后，预构 send_audio 模板：4 个 source_audio 元数据字段全程不变
+            self._audio_req = self._build_audio_template()
             return
         if resp.event == EventType.SessionFailed:
             raise RuntimeError(
@@ -103,7 +136,9 @@ class DoubaoClient:
         )
 
     def _build_start_session(self) -> ast_pb.TranslateRequest:
-        """对齐官方 ast_demo.py：format=wav, uid=did, 不设 platform/denoise。"""
+        """对齐官方 ast_demo.py：format=wav, uid=did, 不设 platform。
+        denoise 显式发送：默认 false 保留说话人音色细节供零样本克隆。
+        """
         a = self.cfg.audio
         t = self.cfg.translation
 
@@ -125,15 +160,16 @@ class DoubaoClient:
         if t.speaker_id:
             req.request.speaker_id = t.speaker_id
 
+        # optional bool denoise = 7：显式发送，避免服务端默认（推测 true）磨平音色
+        req.denoise = t.denoise
+
         if t.mode == "s2s":
             req.target_audio.format = a.output_format  # "ogg_opus"
             req.target_audio.rate = a.output_sample_rate
         return req
 
-    # ── 发送音频 ──
-    async def send_audio(self, pcm_bytes: bytes) -> None:
-        """TaskRequest 每包都带完整 source_audio 元数据（官方 demo 做法）。"""
-        assert self.ws is not None
+    def _build_audio_template(self) -> ast_pb.TranslateRequest:
+        """预构 TaskRequest 模板：4 个静态字段一次填好，send_audio 只改 binary_data。"""
         a = self.cfg.audio
         req = ast_pb.TranslateRequest()
         self._fill_request_meta(req.request_meta)
@@ -142,8 +178,20 @@ class DoubaoClient:
         req.source_audio.rate = a.input_sample_rate
         req.source_audio.bits = a.bits
         req.source_audio.channel = a.channels
-        req.source_audio.binary_data = pcm_bytes
-        await self.ws.send(req.SerializeToString())
+        return req
+
+    # ── 发送音频 ──
+    async def send_audio(self, pcm_bytes: bytes) -> None:
+        """TaskRequest 每包都带完整 source_audio 元数据（官方 demo 做法）。
+
+        复用 _audio_req 模板：每秒 12-13 次调用，省掉每次 protobuf 对象重建。
+        """
+        assert self.ws is not None
+        if self._audio_req is None:
+            # 极少分支：start_session 之前就发音频；按老路径建包以保持鲁棒性
+            self._audio_req = self._build_audio_template()
+        self._audio_req.source_audio.binary_data = pcm_bytes
+        await self.ws.send(self._audio_req.SerializeToString())
 
     async def finish_session(self) -> None:
         if self.ws is None or not self.session_id:
@@ -162,8 +210,8 @@ class DoubaoClient:
             return
         try:
             await self.ws.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"ws close: {e}")
         self.ws = None
 
     # ── 接收事件流 ──
@@ -175,6 +223,13 @@ class DoubaoClient:
         assert self.ws is not None
         try:
             async for raw in self.ws:
+                # 帧大小防御：max_size 已经是网络层兜底，这里再加显式校验
+                if isinstance(raw, (bytes, bytearray)) and len(raw) > _MAX_FRAME_BYTES:
+                    logger.warning(
+                        "oversized frame {} bytes (limit {}), dropping",
+                        len(raw), _MAX_FRAME_BYTES,
+                    )
+                    continue
                 try:
                     resp = ast_pb.TranslateResponse()
                     resp.ParseFromString(raw)

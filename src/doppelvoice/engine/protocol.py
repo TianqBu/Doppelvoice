@@ -6,22 +6,19 @@
 - 无 START_CONNECTION：WS 握手成功后直接发 StartSession
 - 每条消息都有 requestMeta（Endpoint/AppKey/ResourceID/ConnectionID/SessionID/Sequence）
 - 成功状态码：20000000（非 0 / 非 20000000 即错误）
+
+关于 import 路径：
+原始 protoc 生成的 *_pb2.py 用的是绝对 import（`from common import events_pb2`），
+对应 .proto 文件里的 `import "common/events.proto"`。我们已经把这些生成代码里的
+`from common import` / `from products import` 全部改写成 `from doppelvoice.engine._pb.common import`
+之类的完整路径，因此这里不再需要 sys.path 注入 hack —— PyInstaller 打包后也能直接 import。
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-# 让生成的 pb 模块可直接 import（它们互相 import 彼此的 package 路径）
-_PB_ROOT = Path(__file__).resolve().parent / "_pb"
-if str(_PB_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PB_ROOT))
-
-# 需要从生成的包里 import
-from common import events_pb2 as events_pb  # noqa: E402
-from common import rpcmeta_pb2 as rpcmeta_pb  # noqa: E402
-from products.understanding.ast import ast_service_pb2 as ast_pb  # noqa: E402
-from products.understanding.base import au_base_pb2 as au_pb  # noqa: E402
+from doppelvoice.engine._pb.common import events_pb2 as events_pb
+from doppelvoice.engine._pb.common import rpcmeta_pb2 as rpcmeta_pb
+from doppelvoice.engine._pb.products.understanding.ast import ast_service_pb2 as ast_pb
+from doppelvoice.engine._pb.products.understanding.base import au_base_pb2 as au_pb
 
 EventType = events_pb.Type
 STATUS_SUCCESS = 20000000

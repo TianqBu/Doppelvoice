@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import Optional
 
 from loguru import logger
@@ -207,6 +208,15 @@ class SettingsDialog(QDialog):
 
         layout.addLayout(form)
 
+        # 服务端降噪：默认关，提示用户克隆质量影响
+        self.denoise = QCheckBox(self.i18n.t("settings.advanced.denoise"))
+        self.denoise.setToolTip(self.i18n.t("settings.advanced.denoise.tip"))
+        denoise_tip = QLabel(self.i18n.t("settings.advanced.denoise.tip"))
+        denoise_tip.setObjectName("muted")
+        denoise_tip.setWordWrap(True)
+        layout.addWidget(self.denoise)
+        layout.addWidget(denoise_tip)
+
         warn = QLabel(self.i18n.t("settings.advanced.warning"))
         warn.setObjectName("muted")
         warn.setWordWrap(True)
@@ -227,6 +237,14 @@ class SettingsDialog(QDialog):
         self.access_key.setText(env.get("DOUBAO_ACCESS_KEY", ""))
         self.resource_id.setText(env.get("DOUBAO_RESOURCE_ID", "volc.service_type.10053"))
         self.speaker_id.setText(env.get("SPEAKER_ID", ""))
+        # denoise：env 优先，否则用 cfg 当前值（默认 false）
+        denoise_env = env.get("DENOISE", "").lower()
+        if denoise_env in ("1", "true", "yes"):
+            self.denoise.setChecked(True)
+        elif denoise_env in ("0", "false", "no"):
+            self.denoise.setChecked(False)
+        else:
+            self.denoise.setChecked(self.cfg.translation.denoise)
         self.dump_audio.setChecked(env.get("DUMP_AUDIO", "").lower() in ("1", "true", "yes"))
         self.log_subtitle.setChecked(env.get("LOG_SUBTITLE", "").lower() in ("1", "true", "yes"))
 
@@ -238,22 +256,33 @@ class SettingsDialog(QDialog):
         self.output_sr.setValue(a.output_sample_rate)
 
     def _on_test_connection(self) -> None:
+        # 第一时间禁用按钮，避免空字段早返回时仍能重复点击
+        self.test_btn.setEnabled(False)
         app_key = self.app_key.text().strip()
         access_key = self.access_key.text().strip()
         if not app_key or not access_key:
             self.test_result.setText(self.i18n.t("settings.api.test.fail", error="empty"))
             self.test_result.setStyleSheet("color: #ff6b6b;")
+            self.test_btn.setEnabled(True)
             return
-        self.test_btn.setEnabled(False)
         self.test_result.setText(self.i18n.t("settings.api.test.testing"))
         self.test_result.setStyleSheet("color: #ffd93d;")
 
         # 异步在 qasync loop 上执行
-        loop = asyncio.get_event_loop()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # qasync 没装好 / 事件循环未启动 —— 直接报错，避免静默
+            self.test_result.setText(
+                self.i18n.t("settings.api.test.fail", error="event loop not running")
+            )
+            self.test_btn.setEnabled(True)
+            return
         loop.create_task(self._do_test(app_key, access_key))
 
     async def _do_test(self, app_key: str, access_key: str) -> None:
         from doppelvoice.engine.doubao import DoubaoClient
+        from doppelvoice.utils.log import safe_error_message
         # 临时 cfg 副本（不污染主配置）
         cfg = AppConfig(credentials=Credentials(
             app_key=app_key,
@@ -267,8 +296,11 @@ class SettingsDialog(QDialog):
             self.test_result.setText(self.i18n.t("settings.api.test.ok"))
             self.test_result.setStyleSheet("color: #00d4aa;")
         except Exception as e:
-            logger.exception("test connection failed")
-            self.test_result.setText(self.i18n.t("settings.api.test.fail", error=str(e)[:80]))
+            # 不要 logger.exception —— traceback 可能携带服务端回显的凭据
+            logger.warning("test connection failed: {}", type(e).__name__)
+            self.test_result.setText(
+                self.i18n.t("settings.api.test.fail", error=safe_error_message(e))
+            )
             self.test_result.setStyleSheet("color: #ff6b6b;")
         finally:
             await client.finish_session()
@@ -284,17 +316,27 @@ class SettingsDialog(QDialog):
         sp = self.speaker_id.text().strip()
         if sp:
             updates["SPEAKER_ID"] = sp
+        # denoise 写 0/1 而不是只在 true 时写：以便用户能在 .env 看到当前显式值
+        updates["DENOISE"] = "1" if self.denoise.isChecked() else "0"
         if self.dump_audio.isChecked():
             updates["DUMP_AUDIO"] = "1"
         if self.log_subtitle.isChecked():
             updates["LOG_SUBTITLE"] = "1"
         write_env(updates)
 
-        # 同时把音频参数应用到当前 cfg（不持久化采样块/jitter 等到 .env，运行时调）
-        self.cfg.audio.chunk_ms = self.chunk_ms.value()
-        self.cfg.audio.jitter_buffer_ms = self.jitter_ms.value()
-        self.cfg.audio.silence_rms_threshold = self.rms_gate.value()
-        self.cfg.audio.output_sample_rate = self.output_sr.value()
+        # 子 config 是 frozen，用 replace 整体换。等于 atomic swap：
+        # 正在跑的 Orchestrator 抓的是它自己的 snapshot，不受影响；
+        # 下一次新会话才生效。
+        self.cfg.audio = replace(
+            self.cfg.audio,
+            chunk_ms=self.chunk_ms.value(),
+            jitter_buffer_ms=self.jitter_ms.value(),
+            silence_rms_threshold=self.rms_gate.value(),
+            output_sample_rate=self.output_sr.value(),
+        )
+        self.cfg.translation = replace(
+            self.cfg.translation, denoise=self.denoise.isChecked()
+        )
 
         # 把新密钥写回 cfg.credentials，避免重启
         self.cfg.credentials.app_key = updates["DOUBAO_APP_KEY"]

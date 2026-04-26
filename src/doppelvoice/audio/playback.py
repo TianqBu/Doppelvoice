@@ -11,29 +11,8 @@ import sounddevice as sd
 from loguru import logger
 
 from doppelvoice.audio.devices import find_device
+from doppelvoice.audio.resample import resample_int16 as _resample
 from doppelvoice.config import AudioConfig
-
-try:
-    import soxr  # type: ignore
-    _HAS_SOXR = True
-except ImportError:  # soxr 可选，没装就用线性重采样
-    _HAS_SOXR = False
-
-
-def _resample(pcm_int16: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
-    if src_sr == dst_sr:
-        return pcm_int16
-    if _HAS_SOXR:
-        out = soxr.resample(pcm_int16.astype(np.float32) / 32768.0, src_sr, dst_sr)
-        return np.clip(out * 32768.0, -32768, 32767).astype(np.int16)
-    # 粗糙线性重采样兜底
-    ratio = dst_sr / src_sr
-    n_out = int(len(pcm_int16) * ratio)
-    if n_out <= 0:
-        return pcm_int16
-    xp = np.arange(len(pcm_int16))
-    x = np.linspace(0, len(pcm_int16) - 1, n_out)
-    return np.interp(x, xp, pcm_int16).astype(np.int16)
 
 
 class VirtualMicPlayback:
@@ -115,20 +94,20 @@ class VirtualMicPlayback:
                 if len(self._buf) >= threshold:
                     self._started = True
                 else:
-                    outdata[:] = b"\x00" * need
+                    outdata[:] = self._silence_chunk[:need]
                     return
             if len(self._buf) >= need:
-                chunk = bytes(self._buf[:need])
+                # 直接 slice 写 ctypes buffer，省一次中间 bytes() 拷贝
+                outdata[:] = self._buf[:need]
                 del self._buf[:need]
-                outdata[:] = chunk
             else:
                 # underrun：能吐多少吐多少，其余静音
-                have = bytes(self._buf)
+                have_len = len(self._buf)
+                outdata[:have_len] = self._buf[:have_len]
+                outdata[have_len:] = self._silence_chunk[:need - have_len]
                 self._buf.clear()
                 self._underruns += 1
                 self._started = False  # 重新进入蓄能阶段（阈值会降到 _restart_bytes）
-                outdata[: len(have)] = have
-                outdata[len(have):] = b"\x00" * (need - len(have))
 
     def push_pcm(self, pcm_bytes: bytes) -> None:
         """接收豆包返回的 PCM，必要时重采样后进 buffer。超限时丢最早防漂移。"""

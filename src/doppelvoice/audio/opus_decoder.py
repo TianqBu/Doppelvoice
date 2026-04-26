@@ -63,12 +63,10 @@ class OggOpusDecoder:
             f"→ target {target_sr}Hz, duration={native_duration:.2f}s"
         )
 
+        pcm16 = np.clip(data * 32767.0, -32768, 32767).astype(np.int16)
         if sr != target_sr:
-            from doppelvoice.audio.capture import _resample as _rs
-            pcm16 = np.clip(data * 32767.0, -32768, 32767).astype(np.int16)
-            pcm16 = _rs(pcm16, sr, target_sr)
-        else:
-            pcm16 = np.clip(data * 32767.0, -32768, 32767).astype(np.int16)
+            from doppelvoice.audio.resample import resample_int16
+            pcm16 = resample_int16(pcm16, sr, target_sr)
 
         # 验证时长一致（重采样后 duration 应保持不变）
         out_duration = len(pcm16) / target_sr

@@ -22,9 +22,9 @@ _runtime_version.ValidateProtobufRuntimeVersion(
 _sym_db = _symbol_database.Default()
 
 
-from common import events_pb2 as common_dot_events__pb2
-from common import rpcmeta_pb2 as common_dot_rpcmeta__pb2
-from products.understanding.base import au_base_pb2 as products_dot_understanding_dot_base_dot_au__base__pb2
+from doppelvoice.engine._pb.common import events_pb2 as common_dot_events__pb2
+from doppelvoice.engine._pb.common import rpcmeta_pb2 as common_dot_rpcmeta__pb2
+from doppelvoice.engine._pb.products.understanding.base import au_base_pb2 as products_dot_understanding_dot_base_dot_au__base__pb2
 
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n,products/understanding/ast/ast_service.proto\x12\x0f\x64\x61ta.speech.ast\x1a\x13\x63ommon/events.proto\x1a\x14\x63ommon/rpcmeta.proto\x1a)products/understanding/base/au_base.proto\"\x92\x01\n\tReqParams\x12\x0c\n\x04mode\x18\x01 \x01(\t\x12\x17\n\x0fsource_language\x18\x02 \x01(\t\x12\x17\n\x0ftarget_language\x18\x03 \x01(\t\x12\x12\n\nspeaker_id\x18\x04 \x01(\t\x12\x31\n\x06\x63orpus\x18\x64 \x01(\x0b\x32!.data.speech.understanding.Corpus\"\xf5\x02\n\x10TranslateRequest\x12:\n\x0crequest_meta\x18\x01 \x01(\x0b\x32\x1f.data.speech.common.RequestMetaH\x00\x88\x01\x01\x12&\n\x05\x65vent\x18\x02 \x01(\x0e\x32\x17.data.speech.event.Type\x12-\n\x04user\x18\x03 \x01(\x0b\x32\x1f.data.speech.understanding.User\x12\x36\n\x0csource_audio\x18\x04 \x01(\x0b\x32 .data.speech.understanding.Audio\x12\x36\n\x0ctarget_audio\x18\x05 \x01(\x0b\x32 .data.speech.understanding.Audio\x12+\n\x07request\x18\x06 \x01(\x0b\x32\x1a.data.speech.ast.ReqParams\x12\x14\n\x07\x64\x65noise\x18\x07 \x01(\x08H\x01\x88\x01\x01\x42\x0f\n\r_request_metaB\n\n\x08_denoise\"\xf9\x01\n\x11TranslateResponse\x12<\n\rresponse_meta\x18\x01 \x01(\x0b\x32 .data.speech.common.ResponseMetaH\x00\x88\x01\x01\x12&\n\x05\x65vent\x18\x02 \x01(\x0e\x32\x17.data.speech.event.Type\x12\x0c\n\x04\x64\x61ta\x18\x03 \x01(\x0c\x12\x0c\n\x04text\x18\x04 \x01(\t\x12\x12\n\nstart_time\x18\x05 \x01(\x05\x12\x10\n\x08\x65nd_time\x18\x06 \x01(\x05\x12\x0f\n\x07spk_chg\x18\x07 \x01(\x08\x12\x19\n\x11muted_duration_ms\x18\x08 \x01(\x05\x42\x10\n\x0e_response_meta2d\n\nASTService\x12V\n\tTranslate\x12!.data.speech.ast.TranslateRequest\x1a\".data.speech.ast.TranslateResponse(\x01\x30\x01\x62\x06proto3')

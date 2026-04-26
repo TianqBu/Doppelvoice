@@ -48,6 +48,13 @@ TRANSLATIONS: dict[Language, dict[str, str]] = {
         "config.mode": "模式",
         "config.lang.zh": "中文",
         "config.lang.en": "英文",
+        "config.lang.ja": "日语",
+        "config.lang.id": "印尼语",
+        "config.lang.es": "西班牙语",
+        "config.lang.pt": "葡萄牙语",
+        "config.lang.de": "德语",
+        "config.lang.fr": "法语",
+        "config.lang.zhen": "中英互译",
         # subtitles
         "subtitle.source": "原文",
         "subtitle.target": "译文",
@@ -78,6 +85,9 @@ TRANSLATIONS: dict[Language, dict[str, str]] = {
         "settings.audio.input_sr": "输入采样率",
         "settings.audio.output_sr": "输出采样率",
         "settings.advanced.speaker_id": "Speaker ID（实验性，留空使用默认）",
+        "settings.advanced.denoise": "服务端降噪（关闭可保留更多音色细节，克隆更像本人）",
+        "settings.advanced.denoise.tip": "默认关闭。开启后服务端会在送入克隆模型前清理输入，"
+                                         "听起来更干净但会磨平气声/共鸣等独特特征。",
         "settings.advanced.dump_audio": "调试：译音原始 ogg 落盘",
         "settings.advanced.log_subtitle": "调试：字幕文本写入日志",
         "settings.advanced.warning": "⚠ 启用调试落盘会把语音内容明文存到磁盘，仅用于排查问题",
@@ -155,6 +165,13 @@ TRANSLATIONS: dict[Language, dict[str, str]] = {
         "config.mode": "Mode",
         "config.lang.zh": "Chinese",
         "config.lang.en": "English",
+        "config.lang.ja": "Japanese",
+        "config.lang.id": "Indonesian",
+        "config.lang.es": "Spanish",
+        "config.lang.pt": "Portuguese",
+        "config.lang.de": "German",
+        "config.lang.fr": "French",
+        "config.lang.zhen": "ZH ⇄ EN auto",
         # subtitles
         "subtitle.source": "Source",
         "subtitle.target": "Translation",
@@ -185,6 +202,10 @@ TRANSLATIONS: dict[Language, dict[str, str]] = {
         "settings.audio.input_sr": "Input sample rate",
         "settings.audio.output_sr": "Output sample rate",
         "settings.advanced.speaker_id": "Speaker ID (experimental, blank = default)",
+        "settings.advanced.denoise": "Server-side denoise (off = keep voice-clone details)",
+        "settings.advanced.denoise.tip": "Off by default. When on, the server cleans the input before "
+                                         "the cloning model — sounds cleaner but flattens breath, resonance "
+                                         "and other unique characteristics.",
         "settings.advanced.dump_audio": "Debug: dump translated audio (ogg) to disk",
         "settings.advanced.log_subtitle": "Debug: write subtitle text to log files",
         "settings.advanced.warning": "⚠ Debug persistence stores raw speech content on disk; for troubleshooting only.",
@@ -227,9 +248,12 @@ TRANSLATIONS: dict[Language, dict[str, str]] = {
 
 
 def detect_system_language() -> Language:
-    """跳系统语言：中文系统返回 'zh'，其余返回 'en'。"""
+    """跳系统语言：中文系统返回 'zh'，其余返回 'en'。
+
+    Python 3.11+ 标记 locale.getdefaultlocale() 为 deprecated，改用 getlocale()。
+    """
     try:
-        loc = locale.getdefaultlocale()[0] or ""
+        loc = locale.getlocale()[0] or ""
     except Exception:
         loc = ""
     return "zh" if loc.lower().startswith("zh") else "en"

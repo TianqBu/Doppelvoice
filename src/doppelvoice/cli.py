@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from dataclasses import replace
 
 from loguru import logger
 
@@ -32,20 +33,29 @@ def _make_parser() -> argparse.ArgumentParser:
 
 
 def _apply_overrides(cfg: AppConfig, args: argparse.Namespace) -> None:
+    """子 config 是 frozen 的，必须用 replace() 构造新对象再赋回。"""
+    audio_overrides: dict = {}
     if args.input_device:
-        cfg.audio.input_device = args.input_device
+        audio_overrides["input_device"] = args.input_device
     if args.output_device:
-        cfg.audio.output_device = args.output_device
-    if args.source_lang:
-        cfg.translation.source_language = args.source_lang
-    if args.target_lang:
-        cfg.translation.target_language = args.target_lang
-    if args.mode:
-        cfg.translation.mode = args.mode
+        audio_overrides["output_device"] = args.output_device
     if args.chunk_ms:
-        cfg.audio.chunk_ms = args.chunk_ms
+        audio_overrides["chunk_ms"] = args.chunk_ms
     if args.jitter_ms:
-        cfg.audio.jitter_buffer_ms = args.jitter_ms
+        audio_overrides["jitter_buffer_ms"] = args.jitter_ms
+    if audio_overrides:
+        cfg.audio = replace(cfg.audio, **audio_overrides)
+
+    translation_overrides: dict = {}
+    if args.source_lang:
+        translation_overrides["source_language"] = args.source_lang
+    if args.target_lang:
+        translation_overrides["target_language"] = args.target_lang
+    if args.mode:
+        translation_overrides["mode"] = args.mode
+    if translation_overrides:
+        cfg.translation = replace(cfg.translation, **translation_overrides)
+
     if args.log_level:
         cfg.log_level = args.log_level
 

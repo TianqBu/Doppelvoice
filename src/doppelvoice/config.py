@@ -14,13 +14,27 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+def _resolve_project_root() -> Path:
+    """寻找 .env / logs 等用户级文件的根目录。
+
+    - PyInstaller bundle 模式（`sys.frozen` 为真）：用 .exe 所在目录。
+      用户在 Doppelvoice.exe 同目录放 .env / logs 即可。
+    - 开发模式：源码 src/doppelvoice/config.py → parents[2] = 仓库根。
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2]
+
+
+PROJECT_ROOT = _resolve_project_root()
 
 
 @dataclass

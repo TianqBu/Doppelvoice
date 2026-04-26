@@ -37,9 +37,21 @@ Copy `.env.example` to `.env` and fill in your Doubao 同传 2.0 credentials:
 DOUBAO_APP_KEY=your_app_id
 DOUBAO_ACCESS_KEY=your_access_token
 DOUBAO_RESOURCE_ID=volc.service_type.10053
+
+# Optional ────
+# Pick from 9 codes: zh / en / ja / id / es / pt / de / fr / zhen
+# zhen = bilingual ZH⇄EN auto mode; set both source and target to zhen.
+SOURCE_LANG=zh
+TARGET_LANG=en
+
+# Server-side denoise: 0=off (default; preserves voice detail for cloning) / 1=on
+DENOISE=0
 ```
 
 Where to find them: Volcengine Console → Speech Tech → 同声传译 2.0 → Application Management.
+
+`.env` writes are atomic (tmp file + `os.replace`) so an interrupted save
+won't leave you with a truncated credentials file.
 
 ## 5. Self-check first
 
@@ -97,10 +109,22 @@ A: Look at the log's `[metrics]` line. Two metrics:
 - Playback queue depth growing → consumer is slower than producer; reduce `--jitter-ms`.
 
 **Q: How do I switch to en→zh?**
-A: Set `SOURCE_LANG=en` and `TARGET_LANG=zh` in `.env`.
+A: Set `SOURCE_LANG=en` and `TARGET_LANG=zh` in `.env`. Or set both to
+`zhen` for the bilingual ZH⇄EN auto mode.
 
 **Q: Voice cloning doesn't sound like me**
-A: Speak continuously for the first 10–15 s after starting; the model needs time to capture your voice. Also ensure you're using a wideband mic — Bluetooth HFP (AirPods used as a phone mic) only delivers 8 kHz narrowband and gives poor results.
+A:
+1. Wear a wideband mic (avoid Bluetooth HFP); 10 cm or closer to your mouth.
+2. Speak naturally and continuously for the first 10–15 s so the model can
+   sample your voice.
+3. Confirm `DENOISE=0` (default). Server denoise flattens the voice details
+   that the cloning model needs.
+4. The Volcengine Console demo uses a separate BFF endpoint with extra
+   prosody — the public API has a hard ceiling below it.
 
 **Q: Stream drops mid-call**
 A: The orchestrator auto-reconnects with exponential backoff. Check the log for `reconnecting in Xs`. Frequent drops usually mean an API quota/QPS limit; check your Volcengine usage page.
+
+**Q: Peer hears their own voice translated back**
+A: You're on speakers — acoustic feedback loop. Use headphones. Details in
+[TROUBLESHOOTING.md → Feedback loop when using speakers](TROUBLESHOOTING.md#feedback-loop-when-using-speakers).

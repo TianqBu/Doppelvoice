@@ -7,7 +7,7 @@
 
 [中文](README.zh-CN.md) · [Architecture](docs/en/ARCHITECTURE.md) · [Setup](docs/en/SETUP.md) · [Troubleshooting](docs/en/TROUBLESHOOTING.md)
 
-[![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-46%20passed-brightgreen.svg)]()
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)]()
@@ -29,13 +29,20 @@ End-to-end latency ≈ 2.5–3 s. Subtitles stream token-by-token; voice is clon
 ## Features
 
 - 🎙 **End-to-end speech-to-speech** — no separate STT / MT / TTS plumbing
-- 🗣 **Zero-shot voice cloning** — model captures your voice on the fly
+- 🗣 **Zero-shot voice cloning** — model captures your voice on the fly; explicit
+  `denoise=false` to retain breath / resonance details
+- 🌐 **9 languages** — `zh / en / ja / id / es / pt / de / fr / zhen` (the
+  last one is the bilingual ZH⇄EN auto mode)
 - ⚡ **~2.5 s latency** — production-grade real-time
 - 🪟 **Native Windows GUI** (PySide6) with live bilingual subtitles
 - 🔌 **Universal compatibility** — anything that accepts a microphone works
 - 🔁 **Automatic reconnect** with exponential backoff and fatal-error classification
-- 🔒 **Privacy-first defaults** — translated audio and subtitles never persist to disk unless you opt in
-- 🛠 **Configurable** — sample rate, jitter buffer, RMS gate, speaker_id, all tweakable
+- 🔒 **Privacy-first defaults** — translated audio and subtitles never persist
+  to disk unless you opt in; logs auto-redact API keys and bearer tokens
+- 🧹 **Clean device picker** — one entry per physical device (host-API
+  duplicates collapsed; MME 31-char name truncation handled)
+- 🛠 **Configurable** — sample rate, jitter buffer, RMS gate, denoise toggle,
+  speaker_id, all tweakable
 
 ## Demo
 
@@ -105,10 +112,11 @@ All settings have sensible defaults. Override via `.env` or CLI flags.
 |---|---|---|
 | `DOUBAO_APP_KEY` / `DOUBAO_ACCESS_KEY` | _required_ | from Volcengine console |
 | `DOUBAO_RESOURCE_ID` | `volc.service_type.10053` | AST 2.0 resource ID |
-| `SOURCE_LANG` / `TARGET_LANG` | `zh` / `en` | `zh` or `en` |
+| `SOURCE_LANG` / `TARGET_LANG` | `zh` / `en` | one of `zh / en / ja / id / es / pt / de / fr / zhen`. Use `zhen` on **both** sides for bilingual ZH⇄EN auto mode. |
 | `MODE` | `s2s` | `s2s` (speech→speech) or `s2t` (speech→text) |
-| `SPEAKER_ID` | _empty_ | Doubao `ReqParams.speaker_id` (experimental) |
-| `INPUT_DEVICE` / `OUTPUT_DEVICE` | _auto_ | substring of device name |
+| `DENOISE` | `0` | `1` = server-side denoise on (cleaner input but flatter voice clone). `0` keeps breath / resonance for better cloning. |
+| `SPEAKER_ID` | _empty_ | Doubao `ReqParams.speaker_id` — empty = clone the speaker; set to a preset like `zh_female_vv_uranus_bigtts` to use a stock voice instead |
+| `INPUT_DEVICE` / `OUTPUT_DEVICE` | _auto_ | substring of device name (host API hidden; one entry per physical device) |
 | `LOG_LEVEL` | `INFO` | `DEBUG` for verbose |
 | `DUMP_AUDIO` | `false` | persist per-sentence ogg blobs (debug only) |
 | `LOG_SUBTITLE` | `false` | persist subtitle text in logs (debug only) |
@@ -136,10 +144,22 @@ See [docs/en/ARCHITECTURE.md](docs/en/ARCHITECTURE.md) for the full protocol det
 
 ## Known limitations
 
-1. **Voice cloning quality varies** with mic and clarity. AirPods over Bluetooth HFP (16 kHz narrowband phone mode) gives mediocre results — a wired/USB mic or laptop built-in mic is recommended.
-2. **End-to-end latency floor ≈ 2.5 s** is the model's hard limit per the [Seed LiveInterpret 2.0 paper](https://arxiv.org/abs/2507.17527); local processing adds <500 ms.
-3. **Voice expressiveness** of the public AST API is good but not as lively as the Volcengine Console demo (which goes through a different BFF endpoint).
-4. **Per-sentence audio decoding** (ogg_opus) adds ~500 ms latency vs raw PCM (which the API does not currently honor).
+1. **Voice cloning quality varies** with mic and clarity. AirPods over Bluetooth
+   HFP (16 kHz narrowband phone mode) gives mediocre results — a wired/USB mic
+   or laptop built-in mic is recommended. The default `denoise=false` already
+   tells the server to keep your voice's unique characteristics; toggling it
+   on in Settings would flatten the clone further.
+2. **End-to-end latency floor ≈ 2.5 s** is the model's hard limit per the
+   [Seed LiveInterpret 2.0 paper](https://arxiv.org/abs/2507.17527); local
+   processing adds <500 ms.
+3. **Voice expressiveness** of the public AST API is good but not as lively
+   as the Volcengine Console demo (which goes through a different BFF endpoint).
+4. **Per-sentence audio decoding** (ogg_opus) adds ~500 ms latency vs raw
+   PCM (which the API does not currently honor).
+5. **Use headphones, not speakers.** With external speakers the meeting
+   audio gets re-captured by your mic, re-translated, and sent back to the
+   peer as their own translated voice — a textbook acoustic feedback loop.
+   See [Troubleshooting](docs/en/TROUBLESHOOTING.md#feedback-loop-when-using-speakers).
 
 ## Privacy
 

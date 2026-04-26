@@ -47,9 +47,36 @@ WASAPI in shared mode rejects sample rates other than the device native rate. Tr
 ### Audio plays at wrong speed (slow / fast)
 This used to be a sample-rate mismatch bug; v0.2+ fixes it by routing audio at the device's native sample rate. If you still hit it, capture the log line starting with `opus decoded:` and `[sent #N]` — both should report the same Hz value as the device's native rate.
 
-### "对方听到的声音是死人在说话"
+### "Translated voice sounds dead / lifeless"
 - Switch `output_sample_rate` to **48000** (fullband) instead of 24000 — this is the default since v0.2 but check `.env` overrides.
 - The voice cloning quality depends on input mic. AirPods over Bluetooth HFP (phone-call mode, 8 kHz narrowband) gives poor cloning; switch to a wired mic or laptop built-in mic.
+
+### Feedback loop when using speakers
+
+**Symptom**: when the other person on the call talks, *they* hear their
+own voice translated and looped back.
+
+**Mechanism**:
+```
+Peer speaks → your speakers → your real mic picks it up
+  → Doppelvoice (server thinks it's you speaking Chinese)
+  → translation pushed back to CABLE Input → meeting app sends to peer
+  → peer's ear: their own voice in Chinese
+```
+
+**Root cause**: you're using **external speakers** instead of headphones. The
+mic re-captures the meeting audio and re-injects it into our pipeline. Every
+video call tool (Zoom/Teams/WeChat) hits this — they just ship built-in AEC
+(acoustic echo cancellation) to suppress it. We don't.
+
+**Fix**: **wear headphones.** Physically isolating the speaker from the mic
+solves it 100%. If you can't:
+- WebRTC AEC3 integration is a big lift and needs the far-end signal (the
+  peer's original voice), which the meeting app doesn't expose to us.
+- A push-to-talk hotkey would break the loop by gating the mic; on the
+  roadmap.
+- Short-term workaround: bump RMS silence gate up to `0.020+` in Settings
+  to suppress quiet false triggers.
 
 ## Voice cloning quality
 
@@ -57,7 +84,11 @@ This used to be a sample-rate mismatch bug; v0.2+ fixes it by routing audio at t
 1. The public AST API is good but lags behind the Volcengine Console demo (which uses a different BFF endpoint with extra prosody processing). This is a hard ceiling.
 2. Speak continuously for 15+ seconds at the start of a session — the model needs that time to sample your voice.
 3. Use a wideband mic (≥48 kHz native).
-4. Try non-empty `SPEAKER_ID` values in `.env` (experimental — proto field exists but undocumented).
+4. Keep `DENOISE=0` (default) — server-side denoise flattens breath /
+   resonance / unique tonal characteristics that the cloning model would
+   otherwise pick up. Toggle in Settings → Advanced if you want to A/B test.
+5. `SPEAKER_ID` empty (default) = clone mode; setting it to a preset like
+   `zh_female_vv_uranus_bigtts` switches to a **stock voice, not yours**.
 
 ## GUI / Windows
 

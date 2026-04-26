@@ -1,7 +1,7 @@
 # Doppelvoice — Product Requirements
 
-Version: v0.1
-Date: 2026-04-21
+Version: v0.2.0
+Date: 2026-04-26
 Platform: Windows 10/11 (x64)
 
 [中文](../zh/PRD.md)
@@ -12,12 +12,16 @@ Platform: Windows 10/11 (x64)
 
 In any video conferencing, livestream or call app (Zoom, Teams, 腾讯会议, 飞书, Google Meet, Discord, OBS, …):
 
-- User speaks **Chinese** naturally into the mic.
-- The other party hears **English** in **the user's own voice**, in real time.
+- User speaks any of 8 supported languages naturally into the mic
+  (zh / en / ja / id / es / pt / de / fr), or uses the bilingual ZH⇄EN auto
+  mode (`zhen`).
+- The other party hears the target language in **the user's own voice**, in
+  real time.
 - End-to-end latency ≤ 3 s (capture + network + synthesis + virtual-mic injection).
 - Zero-touch for the meeting app — no plugin, no patch.
 
-Later: en → zh, Japanese, Korean, live caption overlay, dual-track recording.
+Later: live caption overlay, dual-track recording, push-to-talk hotkey,
+cross-platform support (macOS / Linux).
 
 ## 2. Users & Scenarios
 

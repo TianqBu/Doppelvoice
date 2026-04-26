@@ -7,7 +7,7 @@
 
 [English](README.md) · [架构设计](docs/zh/ARCHITECTURE.md) · [安装使用](docs/zh/SETUP.md) · [故障排查](docs/zh/TROUBLESHOOTING.md)
 
-[![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-46%20passed-brightgreen.svg)]()
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)]()
@@ -29,13 +29,15 @@
 ## 特性
 
 - 🎙 **端到端语音到语音** — 不需要分别接 STT / MT / TTS 三段
-- 🗣 **0 样本音色克隆** — 模型边采边克隆，不用预录
+- 🗣 **0 样本音色克隆** — 模型边采边克隆，不用预录；显式 `denoise=false` 保留气声/共鸣等独特音色
+- 🌐 **9 种语言** — `zh / en / ja / id / es / pt / de / fr / zhen`（最后一个是中英自动互译模式）
 - ⚡ **~2.5 秒延迟** — 工业级实时性
 - 🪟 **Windows 原生 GUI**（PySide6）+ 中英双语实时字幕
 - 🔌 **通用兼容** — 任何能选麦克风的软件都能用
 - 🔁 **自动重连** + 指数退避 + 致命错误识别
-- 🔒 **默认零落盘** — 译音和字幕都不写硬盘，除非你显式打开
-- 🛠 **可调参数** — 采样率、jitter buffer、RMS 门限、speaker_id 全可调
+- 🔒 **默认零落盘** — 译音和字幕都不写硬盘，除非你显式打开；日志全局自动脱敏 API 密钥/Bearer token
+- 🧹 **设备列表干净** — 每颗物理设备只一条（host API 重复合并；MME 31 字符截断已处理）
+- 🛠 **可调参数** — 采样率、jitter buffer、RMS 门限、降噪开关、speaker_id 全可调
 
 ## 演示
 
@@ -105,10 +107,11 @@ run.bat --log-level DEBUG            :: 详细日志
 |---|---|---|
 | `DOUBAO_APP_KEY` / `DOUBAO_ACCESS_KEY` | _必填_ | 火山引擎控制台获取 |
 | `DOUBAO_RESOURCE_ID` | `volc.service_type.10053` | 同传 2.0 服务 ID |
-| `SOURCE_LANG` / `TARGET_LANG` | `zh` / `en` | `zh` 或 `en` |
+| `SOURCE_LANG` / `TARGET_LANG` | `zh` / `en` | `zh / en / ja / id / es / pt / de / fr / zhen` 之一。`zhen` = 中英互译，**两端都填 `zhen`**。 |
 | `MODE` | `s2s` | `s2s`（语音→语音）或 `s2t`（语音→文本） |
-| `SPEAKER_ID` | _空_ | 豆包 `ReqParams.speaker_id`（实验性） |
-| `INPUT_DEVICE` / `OUTPUT_DEVICE` | _自动_ | 设备名子串匹配 |
+| `DENOISE` | `0` | `1`=服务端降噪开（输入更干净但克隆音色更平），`0`=保留气声/共鸣供更好克隆 |
+| `SPEAKER_ID` | _空_ | 豆包 `ReqParams.speaker_id` —— 留空 = 克隆你；填如 `zh_female_vv_uranus_bigtts` 用预设音色 |
+| `INPUT_DEVICE` / `OUTPUT_DEVICE` | _自动_ | 设备名子串匹配（host API 已隐藏；每颗物理设备仅一条） |
 | `LOG_LEVEL` | `INFO` | `DEBUG` 详细模式 |
 | `DUMP_AUDIO` | `false` | 译音 ogg 落盘（仅调试用） |
 | `LOG_SUBTITLE` | `false` | 字幕文本写入日志（仅调试用） |
@@ -136,10 +139,11 @@ src/doppelvoice/
 
 ## 已知限制
 
-1. **音色克隆质量受麦克风影响**。AirPods 蓝牙 HFP（16kHz 窄带电话模式）效果差，建议有线/USB 麦或笔记本内置麦
+1. **音色克隆质量受麦克风影响**。AirPods 蓝牙 HFP（16kHz 窄带电话模式）效果差，建议有线/USB 麦或笔记本内置麦。默认 `denoise=false` 已经告诉服务端尽量保留你的独特音色；在设置里打开降噪反而会让克隆更平
 2. **端到端延迟下限 ≈ 2.5 秒**，是模型的硬天花板（[Seed LiveInterpret 2.0 论文](https://arxiv.org/abs/2507.17527)），本地处理 < 500 ms
 3. **音色表达性**比火山控制台 demo 略弱（控制台走不同的 BFF 端点带额外韵律处理）
 4. **整句解码** ogg_opus 比 PCM 流多约 500 ms 延迟（API 目前不响应 PCM 输出）
+5. **请戴耳机，别用外放。** 用扬声器时会议音频会被你的麦再录回去 → 重新翻译 → 推回给对方，对方就听到了"自己声音的中文翻译版"——典型的声学反馈环。详见 [故障排查](docs/zh/TROUBLESHOOTING.md#外放声学反馈环)
 
 ## 隐私
 

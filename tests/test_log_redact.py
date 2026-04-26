@@ -1,9 +1,12 @@
-"""日志脱敏 _redact 单元测试。"""
+"""日志脱敏 _redact + setup_logging 单元测试。"""
 from __future__ import annotations
+
+import sys
+from unittest.mock import patch
 
 import pytest
 
-from doppelvoice.utils.log import _redact, _SENTINEL, safe_error_message
+from doppelvoice.utils.log import _redact, _SENTINEL, safe_error_message, setup_logging
 
 
 # 合成的虚拟 token：只用于验证脱敏行为，不是任何真实凭据。
@@ -59,6 +62,26 @@ def test_safe_error_message_redacts():
     e = Exception("failed: app_key=secretvalue123abcdef")
     out = safe_error_message(e)
     assert "secretvalue123" not in out
+
+
+# ── setup_logging robustness (regression test for v0.3.1 → v0.3.2) ──────────
+
+def test_setup_logging_with_none_stderr(tmp_path, monkeypatch):
+    """PyInstaller windowed bundle (onefile + console=False) detaches stdio
+    so sys.stderr / sys.stdout are None. loguru.add(None, ...) raises
+    `TypeError: Cannot log to objects of type 'NoneType'` on every launch.
+    setup_logging must skip the stderr sink when sys.stderr is None and
+    still set up the file sink successfully.
+    """
+    monkeypatch.setattr(sys, "stderr", None)
+    monkeypatch.setattr(sys, "stdout", None)
+    # Should NOT raise
+    setup_logging(tmp_path, level="INFO")
+    # File sink should still produce a log file under tmp_path
+    from loguru import logger
+    logger.info("smoke test entry")
+    log_files = list(tmp_path.glob("doppelvoice_*.log"))
+    assert log_files, "file sink should still create a log file"
 
 
 def test_sentinel_not_re_matched():

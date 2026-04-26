@@ -1,6 +1,6 @@
 [project]
 name = "doppelvoice"
-version = "0.3.1"
+version = "0.3.2"
 description = "Real-time speech-to-speech translation with zero-shot voice cloning, powered by ByteDance Doubao Seed LiveInterpret 2.0. Supports 9 languages (zh/en/ja/id/es/pt/de/fr + bilingual ZH⇄EN auto)."
 readme = "README.md"
 license = { text = "MIT" }

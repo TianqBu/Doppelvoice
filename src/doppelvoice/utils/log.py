@@ -61,20 +61,25 @@ def _patcher(record: dict) -> None:
             )
         except Exception as e:
             # 不能用 loguru（会递归触发本 patcher），直接走 stderr
-            import sys
-            sys.stderr.write(f"[log._patcher] redact exception args failed: {e!r}\n")
+            # 但 windowed PyInstaller bundle 下 sys.stderr 是 None
+            if sys.stderr is not None:
+                sys.stderr.write(f"[log._patcher] redact exception args failed: {e!r}\n")
 
 
 def setup_logging(log_dir: Path, level: str = "INFO") -> None:
     logger.remove()
     logger.configure(patcher=_patcher)
-    logger.add(
-        sys.stderr,
-        level=level,
-        format="<green>{time:HH:mm:ss.SSS}</green> | <level>{level: <7}</level> | "
-               "<cyan>{name}:{line}</cyan> | <level>{message}</level>",
-        enqueue=False,
-    )
+    # PyInstaller windowed bundle (onefile + console=False) detaches stdio
+    # → sys.stderr is None and loguru raises TypeError on add(None, ...).
+    # Only attach the console sink when there's a real stream to write to.
+    if sys.stderr is not None:
+        logger.add(
+            sys.stderr,
+            level=level,
+            format="<green>{time:HH:mm:ss.SSS}</green> | <level>{level: <7}</level> | "
+                   "<cyan>{name}:{line}</cyan> | <level>{message}</level>",
+            enqueue=False,
+        )
     log_dir.mkdir(parents=True, exist_ok=True)
     logger.add(
         log_dir / "doppelvoice_{time:YYYYMMDD}.log",

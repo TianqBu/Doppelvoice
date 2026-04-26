@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-04-26
+
+**Critical hotfix.** v0.3.0 / v0.3.1 binaries crashed at startup with
+`TypeError: Cannot log to objects of type 'NoneType'` for users who
+double-clicked the bundled `.exe` (i.e. all of them).
+
+### Fixed
+- `utils/log.py setup_logging`: `logger.add(sys.stderr, ...)` raised
+  `TypeError` because PyInstaller's onefile + windowed (`console=False`)
+  bootloader detaches stdio — `sys.stderr` is `None`. Now skips the
+  console sink when stderr is unavailable; the file sink under
+  `%APPDATA%\Doppelvoice\logs\` still works as before.
+- `utils/log.py _patcher`: same root cause for the redact-failure
+  fallback `sys.stderr.write(...)`. Now no-ops when stderr is None.
+- `__main__.py`: explicit `if stream is None: continue` before
+  `stream.reconfigure()` (previously caught silently by `AttributeError`,
+  but the code now reads cleanly).
+
+### Tests
+- Added `test_setup_logging_with_none_stderr` regression test that
+  monkeypatches `sys.stderr = None` and confirms `setup_logging` no
+  longer raises and the file sink still produces log output.
+
+### Lesson
+v0.3.0's onefile switch was tested on the dev box where `sys.stderr` is
+always a real TTY. The crash only surfaced for fresh `.exe` users via
+the windowed bootloader. Onefile + `console=False` deserves an explicit
+smoke test in CI; tracked for v0.4.
+
 ## [0.3.1] - 2026-04-26
 
 Documentation drift cleanup driven by user audit of the GitHub README
